@@ -16,33 +16,37 @@ import (
 func main() {
 	ctx := context.Background()
 
-	// Redis (ephemeral)
+	// ✅ 1️⃣ Redis (ephemeral, game & chat state)
 	redisStore := storage.NewRedisStore("localhost:6379", "", 0)
 	defer redisStore.Close()
 
-	// Postgres (persistent)
+	// ✅ 2️⃣ Postgres (persistent game history)
 	pgStore, err := storage.NewPostgresStore(ctx, "postgres://postgres:775688@localhost:5432/tictactoe?sslmode=disable")
-
 	if err != nil {
-		log.Fatalf("Postgres connection failed: %v", err)
+		log.Fatalf("❌ Postgres connection failed: %v", err)
 	}
 	defer pgStore.Close()
 
-	// Setup game and scoring engines
+	// ✅ 3️⃣ Initialize scoring and game engines
 	scorer := scoring.New()
 	engine := game.NewEngine(scorer)
 
-	// Setup network broadcaster and lobby
+	// ✅ 4️⃣ Setup WebSocket broadcaster
 	netBC := network.NewNetBroadcaster()
-	l := lobby.NewLobby(redisStore, netBC)
 
-	// Create demo room for testing
-	r := room.NewRoom("room-1", redisStore, netBC, engine, scorer)
-	l.CreateRoom(ctx, "room-1", r)
+	// ✅ 5️⃣ Create Lobby (connects Redis, broadcaster, and engines)
+	l := lobby.NewLobby(redisStore, netBC, engine, scorer)
 
-	// Start WebSocket server
-	http.HandleFunc("/ws", network.WSHandler(l, netBC, nil))
+	// ✅ 6️⃣ (Optional) Create a demo room for testing or lobby presence
+	r := room.NewRoom("room-lobby", redisStore, netBC, engine, scorer)
+	l.AddRoom(ctx, "room-lobby", r)
 
+	// ✅ 7️⃣ WebSocket route
+	http.HandleFunc("/ws", network.WSHandler(l, netBC))
+
+	// ✅ 8️⃣ Start HTTP server
 	log.Println("✅ Server started at :8080 (Redis + Postgres connected)")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		log.Fatalf("❌ Server error: %v", err)
+	}
 }

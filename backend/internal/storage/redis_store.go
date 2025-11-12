@@ -102,6 +102,29 @@ func (r *RedisStore) SaveRoom(ctx context.Context, roomID string, data interface
 	return nil
 }
 
+// ✅ Fixed: use r.Rdb instead of r.client
+func (r *RedisStore) SaveGroupChat(ctx context.Context, payload map[string]any) error {
+	data, _ := json.Marshal(payload)
+	pipe := r.Rdb.Pipeline()
+	key := "chat:group"
+	pipe.LPush(ctx, key, data)
+	pipe.LTrim(ctx, key, 0, 999)
+	pipe.Expire(ctx, key, 24*time.Hour)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+func (r *RedisStore) SaveMatchChat(ctx context.Context, roomID string, payload map[string]any) error {
+	data, _ := json.Marshal(payload)
+	pipe := r.Rdb.Pipeline()
+	key := fmt.Sprintf("chat:match:%s", roomID)
+	pipe.LPush(ctx, key, data)
+	pipe.LTrim(ctx, key, 0, 200)
+	pipe.Expire(ctx, key, 30*time.Minute)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
 func (r *RedisStore) Close() error {
 	return r.Rdb.Close()
 }

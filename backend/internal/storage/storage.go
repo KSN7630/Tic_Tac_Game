@@ -22,6 +22,9 @@ type Storage interface {
 	SavePlayerScore(ctx context.Context, gameID, playerID string, score int) error
 	GetLeaderboard(ctx context.Context, gameType string) ([]LeaderboardEntry, error)
 
+	SaveGroupChat(ctx context.Context, payload map[string]any) error
+	SaveMatchChat(ctx context.Context, roomID string, payload map[string]any) error
+
 	Close() error
 }
 

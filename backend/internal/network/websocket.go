@@ -2,6 +2,7 @@ package network
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,133 +14,177 @@ import (
 	"github.com/KSN7630/Tic_Tac_Game/backend/internal/models"
 )
 
-// WebSocket upgrader configuration
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
-	// In dev, allow all origins. Restrict in prod.
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin:     func(r *http.Request) bool { return true },
 }
 
-// WSHandler upgrades HTTP to WebSocket and routes messages.
-func WSHandler(l *lobby.Lobby, bc *NetBroadcaster, storeConn func(*websocket.Conn, string)) http.HandlerFunc {
+// WSHandler manages incoming WebSocket connections.
+func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			log.Printf("upgrade error: %v", err)
 			return
 		}
-		defer conn.Close()
-
-		// Parse query params: ?room=<id>&user=<id>&username=<name>
 		q := r.URL.Query()
 		roomID := q.Get("room")
 		userID := q.Get("user")
 		username := q.Get("username")
 
-		if roomID == "" || userID == "" {
-			conn.WriteJSON(map[string]any{"error": "room and user query required"})
-			return
-		}
-
-		ctx := context.Background()
-		player := models.Player{
-			ID:       userID,
-			Username: username,
-		}
-
-		// ✅ Save user to Redis with 30-min TTL
+		// ✅ Save connected user in Redis for 30 minutes
 		if l != nil && l.Store() != nil {
+			ctx := context.Background()
+			player := models.Player{ID: userID, Username: username}
 			if err := l.Store().SaveUser(ctx, player, 30*time.Minute); err != nil {
-				log.Printf("failed to save user in redis: %v", err)
+				log.Printf("⚠️ failed to save user in redis: %v", err)
 			}
 		}
 
-		// ✅ Register connection in broadcaster
+		if roomID == "" || userID == "" {
+			conn.WriteJSON(map[string]any{"error": "room and user query required"})
+			conn.Close()
+			return
+		}
+
 		bc.RegisterConn(roomID, conn)
-		defer bc.UnregisterConn(roomID, conn)
+		defer func() {
+			bc.UnregisterConn(roomID, conn)
+			conn.Close()
+		}()
 
-		// ✅ Register player in the room
-		rm, ok := l.GetRoom(roomID)
-		if !ok {
-			conn.WriteJSON(map[string]any{"error": "room not found"})
-			return
-		}
-		if err := rm.AddPlayer(player); err != nil {
-			conn.WriteJSON(map[string]any{"error": err.Error()})
-			return
-		}
+		// Ping every 30s to close stale connections
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for range ticker.C {
+				if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+					return
+				}
+			}
+		}()
 
-		// ✅ WebSocket message read loop
 		for {
 			var msg map[string]any
 			if err := conn.ReadJSON(&msg); err != nil {
 				log.Printf("read error: %v", err)
 				break
 			}
-
 			action, _ := msg["action"].(string)
 
 			switch action {
+			case "send_group_chat":
+				text, _ := msg["message"].(string)
+				payload := map[string]any{
+					"from":     userID,
+					"username": username,
+					"message":  text,
+					"at":       time.Now().Format(time.RFC3339),
+				}
+				go l.Store().SaveGroupChat(context.Background(), payload)
+				bc.BroadcastToAll(map[string]any{
+					"event":   "group_chat",
+					"payload": payload,
+				})
 
-			case "start_game":
-				ctx := context.Background()
-				_ = rm.StartGame(ctx)
+			case "create_challenge":
+				message, _ := msg["message"].(string)
+				player := models.Player{ID: userID, Username: username}
+				roomID, err := l.CreateChallenge(context.Background(), player, message)
+				if err != nil {
+					conn.WriteJSON(map[string]any{"error": err.Error()})
+					continue
+				}
+				bc.RegisterConn(roomID, conn)
+				conn.WriteJSON(map[string]any{
+					"event":   "challenge_created_ack",
+					"payload": map[string]any{"room_id": roomID},
+				})
+
+			case "accept_challenge":
+				roomID, _ := msg["room"].(string)
+				player := models.Player{ID: userID, Username: username}
+
+				// Register this connection also under the new game room
+				bc.RegisterConn(roomID, conn)
+
+				// Run accept logic
+				if err := l.AcceptChallenge(context.Background(), roomID, player); err != nil {
+					conn.WriteJSON(map[string]any{"error": err.Error()})
+				} else {
+					conn.WriteJSON(map[string]any{
+						"event": "challenge_joined",
+						"payload": map[string]any{
+							"room_id": roomID,
+							"user":    username,
+						},
+					})
+				}
 
 			case "make_move":
+				moveRoomID, _ := msg["room"].(string)
+				if moveRoomID == "" {
+					moveRoomID = roomID
+				}
+
 				idxFloat, _ := msg["index"].(float64)
 				idx := int(idxFloat)
 				elapsedMs, _ := msg["elapsed_ms"].(float64)
 				elapsed := time.Duration(int64(elapsedMs)) * time.Millisecond
 				usedGrace, _ := msg["used_grace"].(bool)
-				_ = rm.MakeMove(context.Background(), userID, idx, elapsed, usedGrace)
 
-			case "send_group_chat":
-				msgText, _ := msg["message"].(string)
-				chat := ChatMessage{
-					From:    userID,
-					Message: msgText,
-					At:      time.Now(),
-				}
-				SaveAndBroadcastGroupChat(context.Background(), l.Store(), bc, chat)
-
-			case "send_match_chat":
-				msgText, _ := msg["message"].(string)
-				chat := ChatMessage{
-					From:    userID,
-					Message: msgText,
-					At:      time.Now(),
-				}
-				key := fmt.Sprintf("chat:match:%s", roomID)
-
-				// Save chat in Redis for this room
-				if l != nil && l.Store() != nil {
-					if err := l.Store().SaveChatMessage(context.Background(), key, chat, 30*time.Minute); err != nil {
-						log.Printf("failed to save match chat: %v", err)
-					}
-				}
-
-				// Broadcast only to this room
-				_ = bc.BroadcastToRoom(context.Background(), roomID, "match_chat", map[string]any{
-					"from":    chat.From,
-					"message": chat.Message,
-					"room_id": roomID,
-					"at":      chat.At,
-				})
-			case "get_replay":
-				board, err := l.Store().LoadBoard(context.Background(), roomID)
-				if err != nil || board == nil {
-					conn.WriteJSON(map[string]any{
-						"event":   "error",
-						"message": "replay not found or expired",
-					})
+				rm, ok := l.GetRoom(moveRoomID)
+				if !ok {
+					conn.WriteJSON(map[string]any{"error": "room not found"})
 					continue
 				}
 
-				// Send the replay data
+				_ = rm.MakeMove(context.Background(), userID, idx, elapsed, usedGrace)
+
+			case "send_match_chat":
+				text, _ := msg["message"].(string)
+				if text == "" {
+					continue
+				}
+				payload := map[string]any{
+					"from":    userID,
+					"message": text,
+					"room_id": roomID,
+					"at":      time.Now().Format(time.RFC3339),
+				}
+				go l.Store().SaveMatchChat(context.Background(), roomID, payload)
+				bc.BroadcastToRoom(context.Background(), roomID, "match_chat", payload)
+
+			case "get_replay":
+				replayRoomID, _ := msg["room"].(string)
+				if replayRoomID == "" {
+					conn.WriteJSON(map[string]any{"error": "room required"})
+					continue
+				}
+
+				if l.Store() == nil {
+					conn.WriteJSON(map[string]any{"error": "no store configured"})
+					continue
+				}
+
+				movesJSON, err := l.Store().LoadChatMessages(context.Background(), fmt.Sprintf("board:%s", replayRoomID))
+				if err != nil || len(movesJSON) == 0 {
+					conn.WriteJSON(map[string]any{"error": "replay not found"})
+					continue
+				}
+
+				// Decode JSON array back into moves
+				var moves []models.Move
+				for _, raw := range movesJSON {
+					var m models.Move
+					_ = json.Unmarshal([]byte(raw), &m)
+					moves = append(moves, m)
+				}
+
 				conn.WriteJSON(map[string]any{
 					"event":   "replay_data",
-					"payload": board.Moves,
+					"payload": moves,
 				})
 
 			default:
