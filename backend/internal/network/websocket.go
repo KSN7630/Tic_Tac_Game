@@ -2,8 +2,6 @@ package network
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -168,23 +166,22 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 					continue
 				}
 
-				movesJSON, err := l.Store().LoadChatMessages(context.Background(), fmt.Sprintf("board:%s", replayRoomID))
-				if err != nil || len(movesJSON) == 0 {
+				// ✅ Load the board (string key, not list)
+				board, err := l.Store().LoadBoard(context.Background(), replayRoomID)
+				if err != nil || board == nil {
 					conn.WriteJSON(map[string]any{"error": "replay not found"})
 					continue
 				}
 
-				// Decode JSON array back into moves
-				var moves []models.Move
-				for _, raw := range movesJSON {
-					var m models.Move
-					_ = json.Unmarshal([]byte(raw), &m)
-					moves = append(moves, m)
+				if len(board.Moves) == 0 {
+					conn.WriteJSON(map[string]any{"error": "no moves recorded"})
+					continue
 				}
 
+				// ✅ Send the move sequence
 				conn.WriteJSON(map[string]any{
 					"event":   "replay_data",
-					"payload": moves,
+					"payload": board.Moves,
 				})
 
 			default:
