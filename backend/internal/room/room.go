@@ -140,16 +140,16 @@ func (r *Room) StartGame(ctx context.Context) error {
 	return nil
 }
 
-// MakeMove applies a player's move and syncs Redis + Postgres data.
+// MakeMove applies a player's move and syncs Redis data (no Postgres).
 func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed time.Duration, usedGrace bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Load latest board from Redis (if available) to avoid stale state.
+	// Load latest board from Redis (if available)
 	if r.store != nil {
 		board, err := r.store.LoadBoard(ctx, r.ID)
 		if err == nil && board != nil {
-			// Restore missing PlayerX/PlayerO/Turn from room metadata if Redis lacks them
+			// Restore missing fields
 			if board.PlayerX == "" && len(r.Players) > 0 {
 				board.PlayerX = r.Players[0].ID
 			}
@@ -157,16 +157,14 @@ func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed
 				board.PlayerO = r.Players[1].ID
 			}
 			if board.Turn == "" {
-				// if turn missing, default to playerX if present
 				board.Turn = board.PlayerX
 			}
 			r.board = board
 		}
 	}
 
-	// Defensive: ensure r.board is initialized
+	// Defensive initialization
 	if r.board == nil {
-		// try to initialize with whoever is first in Players
 		first := ""
 		if len(r.Players) > 0 {
 			first = r.Players[0].ID
@@ -177,36 +175,38 @@ func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed
 		}
 	}
 
-	// Log current turn for debugging
-	log.Printf("➡️ MakeMove called: room=%s player=%s index=%d currentTurn=%s", r.ID, playerID, index, r.board.Turn)
+	// Log for debugging
+	log.Printf("➡️ MakeMove: room=%s player=%s index=%d turn=%s",
+		r.ID, playerID, index, r.board.Turn)
 
-	// Apply the move using engine
+	// Apply move
 	delta, err := r.engine.ApplyMove(r.board, playerID, index, elapsed, usedGrace)
 	if err != nil {
 		log.Printf("❌ ApplyMove failed: %v", err)
 		return err
 	}
 
-	// Update score map
+	// Update score
 	if _, ok := r.scores[playerID]; !ok {
 		r.scores[playerID] = 0
 	}
 	r.scores[playerID] += delta
 
-	// Persist board to Redis with retry (best-effort)
+	// Save replay move to Redis
 	if r.store != nil {
-		if err := r.store.SaveBoard(ctx, r.ID, r.board); err != nil {
-			// retry a few times
-			for i := 0; i < 3; i++ {
-				time.Sleep(50 * time.Millisecond)
-				if retryErr := r.store.SaveBoard(ctx, r.ID, r.board); retryErr == nil {
-					break
-				}
-			}
-		}
+		_ = r.store.SaveReplayMove(ctx, r.ID, models.Move{
+			PlayerID: playerID,
+			Index:    index,
+			At:       time.Now(),
+		}, 30*time.Minute)
 	}
 
-	// Sync latest room info in Redis (turn, players)
+	// Save board to Redis
+	if r.store != nil {
+		_ = r.store.SaveBoard(ctx, r.ID, r.board)
+	}
+
+	// Save room metadata
 	if r.store != nil {
 		roomData := map[string]interface{}{
 			"room_id":  r.ID,
@@ -215,48 +215,24 @@ func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed
 			"turn":     r.board.Turn,
 			"player_x": r.board.PlayerX,
 			"player_o": r.board.PlayerO,
-			"updated":  time.Now().Format(time.RFC3339),
 		}
 		_ = r.store.SaveRoom(ctx, r.ID, roomData, 30*time.Minute)
 	}
 
-	// Broadcast move to room
+	// Broadcast move
 	if r.broadcaster != nil {
-		payload := map[string]any{
+		_ = r.broadcaster.BroadcastToRoom(ctx, r.ID, "move_made", map[string]any{
 			"board":  r.board,
 			"scores": r.scores,
-		}
-		if err := r.broadcaster.BroadcastToRoom(ctx, r.ID, "move_made", payload); err != nil {
-			log.Printf("⚠️ failed to broadcast move: %v", err)
-		}
+		})
 	}
 
-	// Handle game end
+	// GAME OVER LOGIC (NO POSTGRES)
 	if r.board.Finished {
 		r.Status = "completed"
-		winner := r.board.Winner // playerID or empty for draw
+		winner := r.board.Winner // playerID of winner or empty for draw
 
-		// Save summary & scores in Postgres (best-effort)
-		if r.store != nil {
-			if err := r.store.SaveGameSummary(ctx, r.ID, winner); err != nil {
-				log.Printf("⚠️ failed to save game summary: %v", err)
-			}
-			for pid, sc := range r.scores {
-				if err := r.store.SavePlayerScore(ctx, r.ID, pid, sc); err != nil {
-					log.Printf("⚠️ failed to save player score (%s): %v", pid, err)
-				}
-			}
-		}
-
-		var leaderboard []interface{}
-		if r.store != nil {
-			lb, _ := r.store.GetLeaderboard(ctx, "tic-tac-toe")
-			for _, v := range lb {
-				leaderboard = append(leaderboard, v)
-			}
-		}
-
-		// Update room snapshot in Redis
+		// Update room state
 		if r.store != nil {
 			roomData := map[string]interface{}{
 				"room_id":  r.ID,
@@ -268,26 +244,180 @@ func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed
 			_ = r.store.SaveRoom(ctx, r.ID, roomData, 10*time.Minute)
 		}
 
-		// Broadcast game over
+		// Broadcast game over (leaderboard empty)
 		if r.broadcaster != nil {
 			_ = r.broadcaster.BroadcastToRoom(ctx, r.ID, "game_over", map[string]any{
 				"board":       r.board,
 				"scores":      r.scores,
-				"leaderboard": leaderboard,
+				"leaderboard": []string{}, // No postgres -> empty
 			})
 		}
 
-		// Auto-return players to group chat after delay
+		// Notify room to return to chat
 		if r.broadcaster != nil {
 			go func(roomID string) {
 				time.Sleep(10 * time.Second)
-				msg := map[string]any{
-					"message": "Game finished! Returning to group chat...",
-				}
-				_ = r.broadcaster.BroadcastToRoom(context.Background(), roomID, "return_to_group_chat", msg)
+				_ = r.broadcaster.BroadcastToRoom(
+					context.Background(),
+					roomID,
+					"return_to_group_chat",
+					map[string]any{"message": "Game finished! Returning to chat."},
+				)
 			}(r.ID)
 		}
 	}
 
 	return nil
 }
+
+// // MakeMove applies a player's move and syncs Redis + Postgres data.
+// func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed time.Duration, usedGrace bool) error {
+// 	r.mu.Lock()
+// 	defer r.mu.Unlock()
+
+// 	// Load latest board from Redis (if available) to avoid stale state.
+// 	if r.store != nil {
+// 		board, err := r.store.LoadBoard(ctx, r.ID)
+// 		if err == nil && board != nil {
+// 			// Restore missing PlayerX/PlayerO/Turn from room metadata if Redis lacks them
+// 			if board.PlayerX == "" && len(r.Players) > 0 {
+// 				board.PlayerX = r.Players[0].ID
+// 			}
+// 			if board.PlayerO == "" && len(r.Players) > 1 {
+// 				board.PlayerO = r.Players[1].ID
+// 			}
+// 			if board.Turn == "" {
+// 				// if turn missing, default to playerX if present
+// 				board.Turn = board.PlayerX
+// 			}
+// 			r.board = board
+// 		}
+// 	}
+
+// 	// Defensive: ensure r.board is initialized
+// 	if r.board == nil {
+// 		// try to initialize with whoever is first in Players
+// 		first := ""
+// 		if len(r.Players) > 0 {
+// 			first = r.Players[0].ID
+// 		}
+// 		r.board = models.NewEmptyBoard(r.ID, first)
+// 		if r.store != nil {
+// 			_ = r.store.SaveBoard(ctx, r.ID, r.board)
+// 		}
+// 	}
+
+// 	// Log current turn for debugging
+// 	log.Printf("➡️ MakeMove called: room=%s player=%s index=%d currentTurn=%s", r.ID, playerID, index, r.board.Turn)
+
+// 	// Apply the move using engine
+// 	delta, err := r.engine.ApplyMove(r.board, playerID, index, elapsed, usedGrace)
+// 	if err != nil {
+// 		log.Printf("❌ ApplyMove failed: %v", err)
+// 		return err
+// 	}
+
+// 	// Update score map
+// 	if _, ok := r.scores[playerID]; !ok {
+// 		r.scores[playerID] = 0
+// 	}
+// 	r.scores[playerID] += delta
+
+// 	// Persist board to Redis with retry (best-effort)
+// 	if r.store != nil {
+// 		if err := r.store.SaveBoard(ctx, r.ID, r.board); err != nil {
+// 			// retry a few times
+// 			for i := 0; i < 3; i++ {
+// 				time.Sleep(50 * time.Millisecond)
+// 				if retryErr := r.store.SaveBoard(ctx, r.ID, r.board); retryErr == nil {
+// 					break
+// 				}
+// 			}
+// 		}
+// 	}
+
+// 	// Sync latest room info in Redis (turn, players)
+// 	if r.store != nil {
+// 		roomData := map[string]interface{}{
+// 			"room_id":  r.ID,
+// 			"players":  r.Players,
+// 			"status":   r.Status,
+// 			"turn":     r.board.Turn,
+// 			"player_x": r.board.PlayerX,
+// 			"player_o": r.board.PlayerO,
+// 			"updated":  time.Now().Format(time.RFC3339),
+// 		}
+// 		_ = r.store.SaveRoom(ctx, r.ID, roomData, 30*time.Minute)
+// 	}
+
+// 	// Broadcast move to room
+// 	if r.broadcaster != nil {
+// 		payload := map[string]any{
+// 			"board":  r.board,
+// 			"scores": r.scores,
+// 		}
+// 		if err := r.broadcaster.BroadcastToRoom(ctx, r.ID, "move_made", payload); err != nil {
+// 			log.Printf("⚠️ failed to broadcast move: %v", err)
+// 		}
+// 	}
+
+// 	// Handle game end
+// 	if r.board.Finished {
+// 		r.Status = "completed"
+// 		winner := r.board.Winner // playerID or empty for draw
+
+// 		// Save summary & scores in Postgres (best-effort)
+// 		if r.store != nil {
+// 			if err := r.store.SaveGameSummary(ctx, r.ID, winner); err != nil {
+// 				log.Printf("⚠️ failed to save game summary: %v", err)
+// 			}
+// 			for pid, sc := range r.scores {
+// 				if err := r.store.SavePlayerScore(ctx, r.ID, pid, sc); err != nil {
+// 					log.Printf("⚠️ failed to save player score (%s): %v", pid, err)
+// 				}
+// 			}
+// 		}
+
+// 		var leaderboard []interface{}
+// 		if r.store != nil {
+// 			lb, _ := r.store.GetLeaderboard(ctx, "tic-tac-toe")
+// 			for _, v := range lb {
+// 				leaderboard = append(leaderboard, v)
+// 			}
+// 		}
+
+// 		// Update room snapshot in Redis
+// 		if r.store != nil {
+// 			roomData := map[string]interface{}{
+// 				"room_id":  r.ID,
+// 				"players":  r.Players,
+// 				"status":   r.Status,
+// 				"winner":   winner,
+// 				"ended_at": time.Now().Format(time.RFC3339),
+// 			}
+// 			_ = r.store.SaveRoom(ctx, r.ID, roomData, 10*time.Minute)
+// 		}
+
+// 		// Broadcast game over
+// 		if r.broadcaster != nil {
+// 			_ = r.broadcaster.BroadcastToRoom(ctx, r.ID, "game_over", map[string]any{
+// 				"board":       r.board,
+// 				"scores":      r.scores,
+// 				"leaderboard": leaderboard,
+// 			})
+// 		}
+
+// 		// Auto-return players to group chat after delay
+// 		if r.broadcaster != nil {
+// 			go func(roomID string) {
+// 				time.Sleep(10 * time.Second)
+// 				msg := map[string]any{
+// 					"message": "Game finished! Returning to group chat...",
+// 				}
+// 				_ = r.broadcaster.BroadcastToRoom(context.Background(), roomID, "return_to_group_chat", msg)
+// 			}(r.ID)
+// 		}
+// 	}
+
+// 	return nil
+// }

@@ -20,13 +20,6 @@ func main() {
 	redisStore := storage.NewRedisStore("localhost:6379", "", 0)
 	defer redisStore.Close()
 
-	// ✅ 2️⃣ Postgres (persistent game history)
-	pgStore, err := storage.NewPostgresStore(ctx, "postgres://postgres:775688@localhost:5432/tictactoe?sslmode=disable")
-	if err != nil {
-		log.Fatalf("❌ Postgres connection failed: %v", err)
-	}
-	defer pgStore.Close()
-
 	// ✅ 3️⃣ Initialize scoring and game engines
 	scorer := scoring.New()
 	engine := game.NewEngine(scorer)
