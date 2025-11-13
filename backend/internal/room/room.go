@@ -27,6 +27,7 @@ type Room struct {
 	store       storage.Storage
 	broadcaster events.Broadcaster
 	scores      map[string]int
+	LastMoveAt  time.Time
 }
 
 // NewRoom creates a new game room.
@@ -100,6 +101,7 @@ func (r *Room) StartGame(ctx context.Context) error {
 	r.board.PlayerX = firstTurn
 	r.board.PlayerO = secondPlayer
 	r.board.Turn = firstTurn // PlayerX starts first
+	r.LastMoveAt = time.Now()
 
 	// Ensure scores map has entries for both players
 	if _, ok := r.scores[firstTurn]; !ok {
@@ -141,7 +143,7 @@ func (r *Room) StartGame(ctx context.Context) error {
 }
 
 // MakeMove applies a player's move and syncs Redis data (no Postgres).
-func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed time.Duration, usedGrace bool) error {
+func (r *Room) MakeMove(ctx context.Context, playerID string, index int, usedGrace bool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -180,6 +182,8 @@ func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed
 		r.ID, playerID, index, r.board.Turn)
 
 	// Apply move
+	elapsed := time.Since(r.LastMoveAt)
+
 	delta, err := r.engine.ApplyMove(r.board, playerID, index, elapsed, usedGrace)
 	if err != nil {
 		log.Printf("❌ ApplyMove failed: %v", err)
@@ -191,6 +195,7 @@ func (r *Room) MakeMove(ctx context.Context, playerID string, index int, elapsed
 		r.scores[playerID] = 0
 	}
 	r.scores[playerID] += delta
+	r.LastMoveAt = time.Now()
 
 	// Save replay move to Redis
 	if r.store != nil {

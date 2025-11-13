@@ -128,8 +128,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 
 				idxFloat, _ := msg["index"].(float64)
 				idx := int(idxFloat)
-				elapsedMs, _ := msg["elapsed_ms"].(float64)
-				elapsed := time.Duration(int64(elapsedMs)) * time.Millisecond
+
 				usedGrace, _ := msg["used_grace"].(bool)
 
 				rm, ok := l.GetRoom(moveRoomID)
@@ -138,7 +137,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 					continue
 				}
 
-				_ = rm.MakeMove(context.Background(), userID, idx, elapsed, usedGrace)
+				_ = rm.MakeMove(context.Background(), userID, idx, usedGrace)
 
 			case "send_match_chat":
 				text, _ := msg["message"].(string)
