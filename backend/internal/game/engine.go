@@ -1,10 +1,10 @@
 package game
 
 import (
-	"errors"
 	"fmt"
 	"time"
 
+	appErr "github.com/KSN7630/Tic_Tac_Game/backend/internal/errors"
 	"github.com/KSN7630/Tic_Tac_Game/backend/internal/models"
 	"github.com/KSN7630/Tic_Tac_Game/backend/internal/scoring"
 )
@@ -23,25 +23,34 @@ func NewEngine(s *scoring.ScoringEngine) *GameEngine {
 // ApplyMove applies a move to the board, updates state, and returns the score delta.
 func (ge *GameEngine) ApplyMove(b *models.BoardState, playerID string, index int, elapsed time.Duration, usedGrace bool) (int, error) {
 	if b == nil {
-		return 0, errors.New("nil board")
+		return 0, appErr.New(appErr.ErrNilBoard, "the board is not initialized")
 	}
 	if b.Finished {
-		return 0, errors.New("game already finished")
+		return 0, appErr.New(appErr.ErrGameFinished, "the game has already finished")
 	}
 	if index < 0 || index > 8 {
-		return 0, fmt.Errorf("index out of bounds: %d", index)
+		return 0, appErr.New(
+			appErr.ErrIndexOutOfRange,
+			fmt.Sprintf("move index %d is outside the valid range (0-8)", index),
+		)
 	}
 	if b.Cells[index] != "" {
-		return 0, fmt.Errorf("cell %d already occupied", index)
+		return 0, appErr.New(
+			appErr.ErrCellOccupied,
+			fmt.Sprintf("cell %d is already occupied", index),
+		)
 	}
 	if b.Turn != playerID {
-		return 0, errors.New("not player's turn")
+		return 0, appErr.New(appErr.ErrNotPlayersTurn, "It is not your turn to move")
 	}
 
 	// Determine mark for player
 	mark := ge.playerMark(b, playerID)
 	if mark == "" {
-		return 0, errors.New("unknown player mark")
+		return 0, appErr.New(
+			appErr.ErrUnknownPlayerMark,
+			"invalid or unknown player identifier for marking",
+		)
 	}
 
 	// Apply move

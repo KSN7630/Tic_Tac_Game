@@ -28,7 +28,7 @@ func SaveAndBroadcastGroupChat(ctx context.Context, store storage.Storage, bc *N
 	}
 
 	if err := store.SaveGroupChat(ctx, payload); err != nil {
-		log.Printf("⚠️ failed to save group chat: %v", err)
+		log.Printf("failed to save group chat: %v", err)
 	}
 
 	// Broadcast globally
@@ -36,6 +36,6 @@ func SaveAndBroadcastGroupChat(ctx context.Context, store storage.Storage, bc *N
 		"event":   "group_chat",
 		"payload": payload,
 	}); err != nil {
-		log.Printf("⚠️ failed to broadcast group chat: %v", err)
+		log.Printf("failed to broadcast group chat: %v", err)
 	}
 }

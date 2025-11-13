@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	appErr "github.com/KSN7630/Tic_Tac_Game/backend/internal/errors"
 	"github.com/KSN7630/Tic_Tac_Game/backend/internal/events"
 	"github.com/KSN7630/Tic_Tac_Game/backend/internal/game"
 	"github.com/KSN7630/Tic_Tac_Game/backend/internal/models"
@@ -71,7 +72,12 @@ func (l *Lobby) CreateChallenge(ctx context.Context, challenger models.Player, m
 
 	// add challenger as first player
 	if err := rm.AddPlayer(challenger); err != nil {
-		return "", err
+		// If AddPlayer already returned an AppError → return
+		if _, ok := err.(appErr.AppError); ok {
+			return "", err
+		}
+		// Otherwise wrap unexpected error
+		return "", appErr.New(appErr.ErrRoomCreateFailed, err.Error())
 	}
 
 	// register in lobby
@@ -110,12 +116,17 @@ func (l *Lobby) CreateChallenge(ctx context.Context, challenger models.Player, m
 func (l *Lobby) AcceptChallenge(ctx context.Context, roomID string, accepter models.Player) error {
 	rm, ok := l.GetRoom(roomID)
 	if !ok {
-		return fmt.Errorf("room not found")
+		return appErr.New(appErr.ErrRoomNotFound, "requested room does not exist")
 	}
 
-	// add the accepter as second player
+	// add accepter as second player
 	if err := rm.AddPlayer(accepter); err != nil {
-		return err
+		// If AddPlayer already returned an AppError → return
+		if _, ok := err.(appErr.AppError); ok {
+			return err
+		}
+		// Otherwise wrap unexpected error
+		return appErr.New(appErr.ErrChallengeAccept, err.Error())
 	}
 
 	// update persisted room

@@ -17,10 +17,6 @@ type Storage interface {
 	SaveReplayMove(ctx context.Context, gameID string, move interface{}, ttl time.Duration) error
 	SaveUser(ctx context.Context, player models.Player, ttl time.Duration) error
 	SaveRoom(ctx context.Context, roomID string, data interface{}, ttl time.Duration) error
-	// --- Postgres-style persistent operations ---
-	SaveGameSummary(ctx context.Context, gameID, winnerID string) error
-	SavePlayerScore(ctx context.Context, gameID, playerID string, score int) error
-	GetLeaderboard(ctx context.Context, gameType string) ([]LeaderboardEntry, error)
 
 	SaveGroupChat(ctx context.Context, payload map[string]any) error
 	SaveMatchChat(ctx context.Context, roomID string, payload map[string]any) error

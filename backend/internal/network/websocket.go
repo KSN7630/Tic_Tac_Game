@@ -8,6 +8,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	appErr "github.com/KSN7630/Tic_Tac_Game/backend/internal/errors"
 	"github.com/KSN7630/Tic_Tac_Game/backend/internal/lobby"
 	"github.com/KSN7630/Tic_Tac_Game/backend/internal/models"
 )
@@ -16,6 +17,20 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin:     func(r *http.Request) bool { return true },
+}
+
+func sendError(conn *websocket.Conn, err error) {
+	if ae, ok := err.(appErr.AppError); ok {
+		conn.WriteJSON(map[string]any{
+			"event":   "error",
+			"payload": ae,
+		})
+	} else {
+		conn.WriteJSON(map[string]any{
+			"event":   "error",
+			"payload": appErr.New(appErr.ErrUnknown, err.Error()),
+		})
+	}
 }
 
 // WSHandler manages incoming WebSocket connections.
@@ -31,17 +46,17 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 		userID := q.Get("user")
 		username := q.Get("username")
 
-		// ✅ Save connected user in Redis for 30 minutes
+		// Save connected user in Redis for 30 minutes
 		if l != nil && l.Store() != nil {
 			ctx := context.Background()
 			player := models.Player{ID: userID, Username: username}
 			if err := l.Store().SaveUser(ctx, player, 30*time.Minute); err != nil {
-				log.Printf("⚠️ failed to save user in redis: %v", err)
+				log.Printf(" failed to save user in redis: %v", err)
 			}
 		}
 
 		if roomID == "" || userID == "" {
-			conn.WriteJSON(map[string]any{"error": "room and user query required"})
+			sendError(conn, appErr.New(appErr.ErrInvalidUser, "room, user, username required"))
 			conn.Close()
 			return
 		}
@@ -52,10 +67,19 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 			conn.Close()
 		}()
 
-		// Ping every 30s to close stale connections
+		// -------------------------------------------------------
+		// Heartbeat PING (keeps connection alive)
+		// -------------------------------------------------------
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in heartbeat goroutine: %v", r)
+				}
+			}()
+
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
+
 			for range ticker.C {
 				if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
 					return
@@ -64,6 +88,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 		}()
 
 		for {
+
 			var msg map[string]any
 			if err := conn.ReadJSON(&msg); err != nil {
 				log.Printf("read error: %v", err)
@@ -91,7 +116,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 				player := models.Player{ID: userID, Username: username}
 				roomID, err := l.CreateChallenge(context.Background(), player, message)
 				if err != nil {
-					conn.WriteJSON(map[string]any{"error": err.Error()})
+					sendError(conn, err)
 					continue
 				}
 				bc.RegisterConn(roomID, conn)
@@ -109,7 +134,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 
 				// Run accept logic
 				if err := l.AcceptChallenge(context.Background(), roomID, player); err != nil {
-					conn.WriteJSON(map[string]any{"error": err.Error()})
+					sendError(conn, err)
 				} else {
 					conn.WriteJSON(map[string]any{
 						"event": "challenge_joined",
@@ -133,11 +158,13 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 
 				rm, ok := l.GetRoom(moveRoomID)
 				if !ok {
-					conn.WriteJSON(map[string]any{"error": "room not found"})
+					sendError(conn, appErr.New(appErr.ErrRoomNotFound, "room not found"))
 					continue
 				}
 
-				_ = rm.MakeMove(context.Background(), userID, idx, usedGrace)
+				if err := rm.MakeMove(context.Background(), userID, idx, usedGrace); err != nil {
+					sendError(conn, err)
+				}
 
 			case "send_match_chat":
 				text, _ := msg["message"].(string)
@@ -156,7 +183,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 			case "get_replay":
 				replayRoomID, _ := msg["room"].(string)
 				if replayRoomID == "" {
-					conn.WriteJSON(map[string]any{"error": "room required"})
+					sendError(conn, appErr.New(appErr.ErrInvalidRequest, "room required"))
 					continue
 				}
 
@@ -168,12 +195,13 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 				// ✅ Load the board (string key, not list)
 				board, err := l.Store().LoadBoard(context.Background(), replayRoomID)
 				if err != nil || board == nil {
-					conn.WriteJSON(map[string]any{"error": "replay not found"})
+					sendError(conn, appErr.New(appErr.ErrNotFound, "no replay found"))
 					continue
 				}
 
 				if len(board.Moves) == 0 {
-					conn.WriteJSON(map[string]any{"error": "no moves recorded"})
+					// conn.WriteJSON(map[string]any{"error": "no moves recorded"})
+					sendError(conn, appErr.New(appErr.NotRecorded, "no moves recorded"))
 					continue
 				}
 
@@ -184,7 +212,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 				})
 
 			default:
-				conn.WriteJSON(map[string]any{"error": "unknown action"})
+				sendError(conn, appErr.New(appErr.ErrUnknownAction, "unknown action"))
 			}
 		}
 	}

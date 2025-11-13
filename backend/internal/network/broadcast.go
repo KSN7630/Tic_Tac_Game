@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	appErr "github.com/KSN7630/Tic_Tac_Game/backend/internal/errors"
 	"github.com/gorilla/websocket"
 )
 
@@ -32,7 +33,7 @@ func (nb *NetBroadcaster) RegisterConn(roomID string, conn *websocket.Conn) {
 		nb.connRegistry[roomID] = make(map[*websocket.Conn]struct{})
 	}
 	nb.connRegistry[roomID][conn] = struct{}{}
-	log.Printf("✅ Registered connection for room %s (total %d connections)", roomID, len(nb.connRegistry[roomID]))
+	log.Printf("Registered connection for room %s (total %d connections)", roomID, len(nb.connRegistry[roomID]))
 }
 
 // UnregisterConn removes a connection from a specific room and closes it.
@@ -46,7 +47,7 @@ func (nb *NetBroadcaster) UnregisterConn(roomID string, conn *websocket.Conn) {
 		if len(conns) == 0 {
 			delete(nb.connRegistry, roomID)
 		}
-		log.Printf("❎ Unregistered connection for room %s (remaining %d)", roomID, len(conns))
+		log.Printf("Unregistered connection for room %s (remaining %d)", roomID, len(conns))
 	}
 }
 
@@ -65,8 +66,9 @@ func (nb *NetBroadcaster) BroadcastToRoom(ctx context.Context, roomID string, ev
 	for conn := range conns {
 		conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // prevents blocking on slow clients
 		if err := conn.WriteJSON(msg); err != nil {
-			log.Printf("⚠️ broadcast error to room %s: %v", roomID, err)
+			log.Printf(" broadcast error to room %s: %v", roomID, err)
 			go nb.removeConn(roomID, conn)
+			return appErr.New(appErr.ErrBroadcastFailed, err.Error())
 		}
 	}
 
@@ -85,8 +87,9 @@ func (nb *NetBroadcaster) BroadcastToAll(payload any) error {
 		for conn := range conns {
 			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 			if err := conn.WriteJSON(msg); err != nil {
-				log.Printf("⚠️ global broadcast error (room %s): %v", roomID, err)
+				log.Printf("global broadcast error (room %s): %v", roomID, err)
 				go nb.removeConn(roomID, conn)
+				return appErr.New(appErr.ErrBroadcastFailed, err.Error())
 			}
 		}
 	}
