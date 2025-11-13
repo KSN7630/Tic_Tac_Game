@@ -1,0 +1,11 @@
+server:
+  address: ":8080"
+  graceful_timeout: "15s"
+
+redis:
+  host: "localhost:6379"
+  password: ""
+  db: 0
+
+lobby:
+  default_room: "room-lobby"
