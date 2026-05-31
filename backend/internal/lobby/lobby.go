@@ -73,7 +73,7 @@ func (l *Lobby) CreateChallenge(ctx context.Context, challenger models.Player, m
 	// add challenger as first player
 	if err := rm.AddPlayer(challenger); err != nil {
 		// If AddPlayer already returned an AppError → return
-		if _, ok := err.(appErr.AppError); ok {
+		if _, ok := appErr.As(err); ok {
 			return "", err
 		}
 		// Otherwise wrap unexpected error
@@ -122,7 +122,7 @@ func (l *Lobby) AcceptChallenge(ctx context.Context, roomID string, accepter mod
 	// add accepter as second player
 	if err := rm.AddPlayer(accepter); err != nil {
 		// If AddPlayer already returned an AppError → return
-		if _, ok := err.(appErr.AppError); ok {
+		if _, ok := appErr.As(err); ok {
 			return err
 		}
 		// Otherwise wrap unexpected error

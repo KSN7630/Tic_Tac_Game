@@ -24,6 +24,34 @@ func NewNetBroadcaster() *NetBroadcaster {
 	}
 }
 
+// connWriteLocks serializes writes per websocket connection.
+// gorilla/websocket only supports one concurrent writer per connection, but a
+// single connection is written to from many goroutines (its own read loop plus
+// every broadcast triggered by other players). Without this, two simultaneous
+// writes corrupt the connection and the client is disconnected.
+var connWriteLocks sync.Map // *websocket.Conn -> *sync.Mutex
+
+func connLock(conn *websocket.Conn) *sync.Mutex {
+	m, _ := connWriteLocks.LoadOrStore(conn, &sync.Mutex{})
+	return m.(*sync.Mutex)
+}
+
+// safeWriteJSON writes a JSON message to conn while holding that connection's
+// write lock, guaranteeing no two goroutines write concurrently.
+func safeWriteJSON(conn *websocket.Conn, v any) error {
+	mu := connLock(conn)
+	mu.Lock()
+	defer mu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	return conn.WriteJSON(v)
+}
+
+// releaseConnLock drops the write lock once a connection is gone, so the
+// sync.Map does not grow without bound.
+func releaseConnLock(conn *websocket.Conn) {
+	connWriteLocks.Delete(conn)
+}
+
 // RegisterConn adds a connection to a specific room.
 func (nb *NetBroadcaster) RegisterConn(roomID string, conn *websocket.Conn) {
 	nb.mu.Lock()
@@ -49,49 +77,71 @@ func (nb *NetBroadcaster) UnregisterConn(roomID string, conn *websocket.Conn) {
 		}
 		log.Printf("Unregistered connection for room %s (remaining %d)", roomID, len(conns))
 	}
+	releaseConnLock(conn)
 }
 
 // BroadcastToRoom sends an event + payload to all connections in the given room.
 func (nb *NetBroadcaster) BroadcastToRoom(ctx context.Context, roomID string, event string, payload any) error {
+	// Snapshot connections so we don't hold the lock during network writes.
 	nb.mu.RLock()
-	conns, ok := nb.connRegistry[roomID]
+	conns := nb.connRegistry[roomID]
+	targets := make([]*websocket.Conn, 0, len(conns))
+	for conn := range conns {
+		targets = append(targets, conn)
+	}
 	nb.mu.RUnlock()
 
-	if !ok || len(conns) == 0 {
+	if len(targets) == 0 {
 		return nil
 	}
 
 	msg := map[string]any{"event": event, "payload": payload}
 
-	for conn := range conns {
-		conn.SetWriteDeadline(time.Now().Add(5 * time.Second)) // prevents blocking on slow clients
-		if err := conn.WriteJSON(msg); err != nil {
+	var lastErr error
+	for _, conn := range targets {
+		if err := safeWriteJSON(conn, msg); err != nil {
 			log.Printf(" broadcast error to room %s: %v", roomID, err)
 			go nb.removeConn(roomID, conn)
-			return appErr.New(appErr.ErrBroadcastFailed, err.Error())
+			lastErr = err
+			// Keep going so the remaining players still receive the event.
 		}
 	}
 
+	if lastErr != nil {
+		return appErr.New(appErr.ErrBroadcastFailed, lastErr.Error())
+	}
 	return nil
 }
 
 // BroadcastToAll sends a payload globally to all connections across all rooms.
 // This is used for group chat and lobby-wide notifications.
 func (nb *NetBroadcaster) BroadcastToAll(payload any) error {
-	nb.mu.RLock()
-	defer nb.mu.RUnlock()
-
 	msg := map[string]any{"event": "group_chat", "payload": payload}
 
+	// Deduplicate: a single connection may be registered under several rooms
+	// (e.g. lobby + game room), and must receive each message exactly once.
+	targets := make(map[*websocket.Conn]string)
+	nb.mu.RLock()
 	for roomID, conns := range nb.connRegistry {
 		for conn := range conns {
-			conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-			if err := conn.WriteJSON(msg); err != nil {
-				log.Printf("global broadcast error (room %s): %v", roomID, err)
-				go nb.removeConn(roomID, conn)
-				return appErr.New(appErr.ErrBroadcastFailed, err.Error())
+			if _, seen := targets[conn]; !seen {
+				targets[conn] = roomID
 			}
 		}
+	}
+	nb.mu.RUnlock()
+
+	var lastErr error
+	for conn, roomID := range targets {
+		if err := safeWriteJSON(conn, msg); err != nil {
+			log.Printf("global broadcast error (room %s): %v", roomID, err)
+			go nb.removeConn(roomID, conn)
+			lastErr = err
+		}
+	}
+
+	if lastErr != nil {
+		return appErr.New(appErr.ErrBroadcastFailed, lastErr.Error())
 	}
 	return nil
 }
