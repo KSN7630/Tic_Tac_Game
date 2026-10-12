@@ -20,16 +20,21 @@ var upgrader = websocket.Upgrader{
 }
 
 func sendError(conn *websocket.Conn, err error) {
-	if ae, ok := err.(appErr.AppError); ok {
-		conn.WriteJSON(map[string]any{
+	if ae, ok := appErr.As(err); ok {
+		if writeErr := safeWriteJSON(conn, map[string]any{
 			"event":   "error",
 			"payload": ae,
-		})
-	} else {
-		conn.WriteJSON(map[string]any{
-			"event":   "error",
-			"payload": appErr.New(appErr.ErrUnknown, err.Error()),
-		})
+		}); writeErr != nil {
+			log.Printf("sendError write failed: %v", writeErr)
+		}
+		return
+	}
+
+	if writeErr := safeWriteJSON(conn, map[string]any{
+		"event":   "error",
+		"payload": appErr.New(appErr.ErrUnknown, err.Error()),
+	}); writeErr != nil {
+		log.Printf("sendError write failed: %v", writeErr)
 	}
 }
 
@@ -105,8 +110,14 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 					"message":  text,
 					"at":       time.Now().Format(time.RFC3339),
 				}
-				go l.Store().SaveGroupChat(context.Background(), payload)
-				bc.BroadcastToAll(map[string]any{
+				if l.Store() != nil {
+					go func() {
+						if err := l.Store().SaveGroupChat(context.Background(), payload); err != nil {
+							log.Printf("failed to save group chat: %v", err)
+						}
+					}()
+				}
+				_ = bc.BroadcastToAll(map[string]any{
 					"event":   "group_chat",
 					"payload": payload,
 				})
@@ -120,7 +131,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 					continue
 				}
 				bc.RegisterConn(roomID, conn)
-				conn.WriteJSON(map[string]any{
+				_ = safeWriteJSON(conn, map[string]any{
 					"event":   "challenge_created_ack",
 					"payload": map[string]any{"room_id": roomID},
 				})
@@ -136,7 +147,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 				if err := l.AcceptChallenge(context.Background(), roomID, player); err != nil {
 					sendError(conn, err)
 				} else {
-					conn.WriteJSON(map[string]any{
+					_ = safeWriteJSON(conn, map[string]any{
 						"event": "challenge_joined",
 						"payload": map[string]any{
 							"room_id": roomID,
@@ -177,8 +188,14 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 					"room_id": roomID,
 					"at":      time.Now().Format(time.RFC3339),
 				}
-				go l.Store().SaveMatchChat(context.Background(), roomID, payload)
-				bc.BroadcastToRoom(context.Background(), roomID, "match_chat", payload)
+				if l.Store() != nil {
+					go func() {
+						if err := l.Store().SaveMatchChat(context.Background(), roomID, payload); err != nil {
+							log.Printf("failed to save match chat: %v", err)
+						}
+					}()
+				}
+				_ = bc.BroadcastToRoom(context.Background(), roomID, "match_chat", payload)
 
 			case "get_replay":
 				replayRoomID, _ := msg["room"].(string)
@@ -188,7 +205,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 				}
 
 				if l.Store() == nil {
-					conn.WriteJSON(map[string]any{"error": "no store configured"})
+					sendError(conn, appErr.New(appErr.ErrUnknown, "no store configured"))
 					continue
 				}
 
@@ -206,7 +223,7 @@ func WSHandler(l *lobby.Lobby, bc *NetBroadcaster) http.HandlerFunc {
 				}
 
 				// ✅ Send the move sequence
-				conn.WriteJSON(map[string]any{
+				_ = safeWriteJSON(conn, map[string]any{
 					"event":   "replay_data",
 					"payload": board.Moves,
 				})

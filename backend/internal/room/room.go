@@ -89,8 +89,8 @@ func (r *Room) StartGame(ctx context.Context) error {
 
 	r.Status = "in_progress"
 
-	// Toss logic — randomly decide who starts (fair chance)
-	rand.Seed(time.Now().UnixNano())
+	// Toss logic — randomly decide who starts (fair chance).
+	// The global rand source is auto-seeded in Go 1.20+, so no manual Seed.
 	startIndex := rand.Intn(2) // 0 or 1
 
 	firstTurn := r.Players[startIndex].ID
@@ -189,7 +189,7 @@ func (r *Room) MakeMove(ctx context.Context, playerID string, index int, usedGra
 
 	if err != nil {
 		log.Printf("ApplyMove failed: %v", err)
-		if _, ok := err.(appErr.AppError); ok {
+		if _, ok := appErr.As(err); ok {
 			// it's already structured → bubble up
 			return err
 		}
