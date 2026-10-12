@@ -11,6 +11,10 @@
 # Test binary, built with `go test -c`
 *.test
 
+FRONTEND_SPEC.md
+PROJECT_STATUS.md
+README.md
+
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*
