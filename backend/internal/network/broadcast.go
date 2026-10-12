@@ -113,10 +113,13 @@ func (nb *NetBroadcaster) BroadcastToRoom(ctx context.Context, roomID string, ev
 	return nil
 }
 
-// BroadcastToAll sends a payload globally to all connections across all rooms.
-// This is used for group chat and lobby-wide notifications.
+// BroadcastToAll sends a message globally to all connections across all rooms.
+// This is used for group chat and lobby-wide notifications. Callers already
+// pass a full {"event": ..., "payload": ...} envelope (see lobby.CreateChallenge
+// and the send_group_chat handler) — do not re-wrap it here, or the client
+// receives a doubly-nested payload with the real event/fields one level too deep.
 func (nb *NetBroadcaster) BroadcastToAll(payload any) error {
-	msg := map[string]any{"event": "group_chat", "payload": payload}
+	msg := payload
 
 	// Deduplicate: a single connection may be registered under several rooms
 	// (e.g. lobby + game room), and must receive each message exactly once.
